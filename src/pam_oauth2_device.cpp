@@ -546,6 +546,11 @@ parse_args(Config &config, [[maybe_unused]] int flags, int argc, const char **ar
 	return false;
     }
 
+    if(config.client_debug)
+    {
+	logger.set_log_level(pam_oauth2_log::log_level_t::DEBUG);
+	logger.log(pam_oauth2_log::log_level_t::DEBUG, "config enabled debug");
+    }
     // FIXME make smarter: For now we just look for "debug" as it is a common argument to PAM modules
     // TODO Note the config file can also assert debug for now
     for(int i = 1; i < argc; ++i)
@@ -553,6 +558,7 @@ parse_args(Config &config, [[maybe_unused]] int flags, int argc, const char **ar
         {
             config.client_debug = true;
             logger.set_log_level(pam_oauth2_log::log_level_t::DEBUG);
+	    logger.log(pam_oauth2_log::log_level_t::DEBUG, "pam config enabled debug");
         }
 
     if(flags & PAM_SILENT)
