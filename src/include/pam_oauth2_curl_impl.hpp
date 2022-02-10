@@ -23,6 +23,8 @@ struct call_data {
     pam_oauth2_curl::params post_data;
     curl_slist *headers;
     pam_oauth2_curl::credential cred;
+    // Classic C string error buffer
+    char errbuf[CURL_ERROR_SIZE];
 
     call_data() : callback_data(), auz_hdr(), post_data(), headers(nullptr), cred() { }
     ~call_data()

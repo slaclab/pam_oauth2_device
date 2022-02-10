@@ -49,12 +49,18 @@ pam_oauth2_curl::call(Config const &config, std::string const &url)
     impl_->add_call_data(readBuffer);
     impl_->add_credential(readBuffer, make_credential(config));
     curl_easy_setopt(impl_->curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(impl_->curl, CURLOPT_ERRORBUFFER, readBuffer.errbuf);
+    if(config.client_debug) {
+	curl_easy_setopt(impl_->curl, CURLOPT_VERBOSE, 1);
+    }
 
     CURLcode res = curl_easy_perform(impl_->curl);
 
-    if(res != CURLE_OK)
-        // TODO make more informative
-	throw NetworkError("curl failed HTTP call");
+    if(res != CURLE_OK) {
+	NetworkError err("curl failed HTTP call");
+	err.add_details(readBuffer.errbuf);
+	throw err;
+    }
     return readBuffer.callback_data;
 }
 
@@ -70,10 +76,17 @@ pam_oauth2_curl::call(Config const &config, const std::string &url,
     impl_->add_credential(readBuffer, make_credential(config));
     curl_easy_setopt(impl_->curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(impl_->curl, CURLOPT_POSTFIELDS, params.c_str());
+    curl_easy_setopt(impl_->curl, CURLOPT_ERRORBUFFER, readBuffer.errbuf);
+    if(config.client_debug) {
+	curl_easy_setopt(impl_->curl, CURLOPT_VERBOSE, 1);
+    }
     // Automatically POSTs because we set postfields
     CURLcode res = curl_easy_perform(impl_->curl);
-    if(res != CURLE_OK)
-        throw NetworkError("curl failed HTTP POST");
+    if(res != CURLE_OK) {
+	NetworkError err("curl failed HTTP POST");
+	err.add_details(readBuffer.errbuf);
+	throw err;
+    }
     return readBuffer.callback_data;
 }
 
@@ -86,10 +99,16 @@ pam_oauth2_curl::call(Config const &config, const std::string &url, credential &
     impl_->add_call_data(readBuffer);
     impl_->add_credential(readBuffer, std::move(cred));
     curl_easy_setopt(impl_->curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(impl_->curl, CURLOPT_ERRORBUFFER, readBuffer.errbuf);
+    if(config.client_debug) {
+	curl_easy_setopt(impl_->curl, CURLOPT_VERBOSE, 1);
+    }
     CURLcode res = curl_easy_perform(impl_->curl);
-    if(res != CURLE_OK)
-        // TODO make more informative
-        throw NetworkError("curl failed HTTP GET");
+    if(res != CURLE_OK) {
+	NetworkError err("curl failed HTTP GET");
+	err.add_details(readBuffer.errbuf);
+	throw err;
+    }
     return readBuffer.callback_data;
 }
 
