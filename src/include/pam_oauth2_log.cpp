@@ -87,16 +87,19 @@ pam_oauth2_log::log(BaseError const &e) noexcept
     if(lev_ == log_level_t::OFF)
         return;
     // Simple log
-    if(ph_)
+    if(ph_) {
         pam_syslog(ph_, syslog_pri(e.severity_), "%s", e.what());
+	if(!e.details().empty())
+	    pam_syslog(ph_, syslog_pri(e.severity_), "** %s", e.details().c_str());
+    }
     if(log_)
     {
         // short message
 	fprintf(log_, "[%4s] %s\n", e.type(), e.what());
-        if(!e.details_.empty())
+        if(!e.details().empty())
         {
             // todo? make this better formatted
-            fprintf(log_, "%s\n", e.details_.c_str());
+            fprintf(log_, "%s\n", e.details().c_str());
         }
     }
 }

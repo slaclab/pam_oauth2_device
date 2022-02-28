@@ -43,7 +43,11 @@ void Config::load(const char *path)
     if(j.find("tls") !=  the_end)
     {
 	auto tls_section = j.at("tls");
-	tls_ca_path = tls_section.at("ca_path").get<std::string>();
+	if(tls_section.find("ca_bundle") != tls_section.end()) {
+	    tls_ca_bundle = tls_section.at("ca_bundle").get<std::string>();
+	} else {
+	    tls_ca_path = tls_section.at("ca_path").get<std::string>();
+	}
     } else {
 	// typical IGTF (www.igtf.net) default
 	tls_ca_path = "/etc/grid-security/certificates";

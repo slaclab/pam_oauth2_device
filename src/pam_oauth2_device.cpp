@@ -542,7 +542,8 @@ parse_args(Config &config, [[maybe_unused]] int flags, int argc, const char **ar
     }
     catch (json::exception &e)
     {
-	logger.log(pam_oauth2_log::log_level_t::ERR, "Failed to load config");
+	logger.log(pam_oauth2_log::log_level_t::ERR, "Failed to load config:");
+	logger.log(pam_oauth2_log::log_level_t::ERR, e.what());
 	return false;
     }
 

@@ -25,6 +25,7 @@ public:
         ldap_filter,
         ldap_attr,
 	tls_ca_path,
+	tls_ca_bundle,
         group_service_name,
         cloud_endpoint,
         cloud_username,

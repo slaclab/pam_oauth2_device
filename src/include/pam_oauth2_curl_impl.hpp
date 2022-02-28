@@ -42,6 +42,8 @@ struct pam_oauth2_curl_impl {
     static std::string make_post_data(pam_oauth2_curl::params const &data);
     // RFC 3986 section 2.2 (and 2.4 for '%').
     static std::string reserved;
+    // from curl.h; the enum id of the SSL backend that we are using
+    // curlssl_backend backend;
 
 public:
     pam_oauth2_curl_impl(Config const &config);

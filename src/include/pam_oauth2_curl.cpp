@@ -12,6 +12,12 @@
 #include "pam_oauth2_excpt.hpp"
 
 
+/*
+#if LIBCURL_VERSION_MAJOR < 7 || LIBCURL_VERSION_MINOR < 60
+#error "Must have at least curl 7.60.0"
+#endif
+*/
+
 pam_oauth2_curl::pam_oauth2_curl(Config const &config): impl_(new pam_oauth2_curl_impl(config))
 {
     if(!impl_)
@@ -142,8 +148,9 @@ pam_oauth2_curl::credential::~credential()
 
 // pam_oauth2_curl_impl implementation
 
-pam_oauth2_curl_impl::pam_oauth2_curl_impl(Config const &config): curl{curl_easy_init()}, ret(CURLE_OK)
+pam_oauth2_curl_impl::pam_oauth2_curl_impl(Config const &config): curl{nullptr}, ret(CURLE_OK)
 {
+    curl = curl_easy_init();
     if(!curl)
 	throw NetworkError("curl: cannot initialise curl");
     reset(config);
@@ -172,8 +179,17 @@ pam_oauth2_curl_impl::reset(const Config &config)
     if(curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) != CURLE_OK)
         throw NetworkError("curl setup cannot set verifyhost");
 
-    if(curl_easy_setopt(curl, CURLOPT_CAPATH, config.tls_ca_path.c_str()) != CURLE_OK)
-        throw NetworkError("curl setup cannot set CA path");
+    // Prefer the bundle over the path for NSS compat
+    if(!config.tls_ca_bundle.empty()) {
+	if(curl_easy_setopt(curl, CURLOPT_CAINFO, config.tls_ca_bundle.c_str()) != CURLE_OK)
+	    throw NetworkError("curl setup cannot set CA bundle");
+    }
+    else if(!config.tls_ca_path.empty()) {
+	if(curl_easy_setopt(curl, CURLOPT_CAPATH, config.tls_ca_path.c_str()) != CURLE_OK)
+	    throw NetworkError("curl setup cannot set CA path");
+    } else {
+	// FIXME warning? or error?
+    }
     //(void)curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, buf);
 }
 
