@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 #include "pam_oauth2_device.hpp"
 
+
 #define DEVICE_ENDPOINT "http://localhost:8042/devicecode"
 #define TOKEN_ENDPOINT "http://localhost:8042/token"
 #define USERINFO_ENDPOINT "http://localhost:8042/userinfo"
@@ -18,8 +19,12 @@ namespace
 
 TEST(PamTest, Device)
 {
+    Config config;
+    pam_oauth2_log logger;
     DeviceAuthResponse response;
-    make_authorization_request(CLIENT_ID,
+    make_authorization_request(config,
+			       logger,
+			       CLIENT_ID,
                                CLIENT_SECRET,
                                SCOPE,
                                DEVICE_ENDPOINT,

@@ -11,6 +11,9 @@
         "username_attribute": "preferred_username",
         "local_username_suffix": ""
     },
+    "tls": {
+	"ca_path": "/etc/pki/certificates"
+    },
     "ldap": {
         "host": "ldaps://ldap-server:636",
         "basedn": "basedn",
@@ -29,7 +32,8 @@
     "cloud": {
         "endpoint": "http://host-172-16-114-198.nubes.stfc.ac.uk",
         "username": "root",
-        "access": false
+        "access": false,
+	"metadata_file": "metadata.json"
     },
     "users": {
         "provider_user_id_1":

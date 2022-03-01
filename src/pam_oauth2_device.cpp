@@ -1,5 +1,6 @@
-#include <curl/curl.h>
 #include <security/pam_appl.h>
+#define PAM_SM_AUTH
+#define PAM_SM_ACCOUNT
 #include <security/pam_modules.h>
 
 #include <chrono>
@@ -10,88 +11,70 @@
 #include <iostream>
 #include <iomanip>
 #include <string>
-#include <regex>
+//#include <regex>
+#include <cstdio>
+#include <fstream>
 
 #include "include/config.hpp"
 #include "include/metadata.hpp"
 #include "include/ldapquery.h"
 #include "include/nayuki/QrCode.hpp"
 #include "include/nlohmann/json.hpp"
+#include "include/pam_oauth2_curl.hpp"
+#include "include/pam_oauth2_excpt.hpp"
+#include "include/pam_oauth2_log.hpp"
 #include "pam_oauth2_device.hpp"
 
 using json = nlohmann::json;
 
-std::string url_encode(const std::string &value) {
-    std::ostringstream escaped;
-    escaped.fill('0');
-    escaped << std::hex;
+constexpr char const *config_path = "/etc/pam_oauth2_device/config.json";
 
-    for (const auto c : value) {
 
-        // Keep alphanumeric and other accepted characters intact
-        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            escaped << c;
-            continue;
-        }
+//! Function to parse the PAM args (as supplied in the PAM config), updating our config
+bool parse_args(Config &config, int flags, int argc, const char **argv, pam_oauth2_log &logger);
 
-        // Any other characters are percent-encoded
-        escaped << std::uppercase;
-        escaped << '%' << std::setw(2) << int((unsigned char) c);
-        escaped << std::nouppercase;
-    }
+//! Call LDAP to ask if we are to bypass the pam_sm_* call for a given local_user
+bool bypass(Config const &, pam_oauth2_log &, char const *);
 
-    return escaped.str();
+//! Translate from C++'s log level (as defined in pam_oauth2_log) to a C one used by LDAP
+enum ldap_loglevel_t ldap_log_level(pam_oauth2_log::log_level_t);
+
+
+
+void Userinfo::add_group(const std::string &group)
+{
+    // there doesn't seem to be an insert for sorted sequences? anyway, it's not hugely important here
+    groups_.push_back(group);
+    std::sort(groups_.begin(), groups_.end());
 }
 
-class BaseError : public std::exception
+void Userinfo::set_groups(const std::vector<std::string> &groups)
 {
-public:
-    const char *what() const throw()
-    {
-        printf("Base error");
-        return "Base Error";
-    }
-};
+    groups_ = groups;    // copies vector and strings
+    std::sort(groups_.begin(), groups_.end());
+}
 
-class PamError : public BaseError
-{
-public:
-    const char *what() const throw()
-    {
-        printf("PAM error");
-        return "PAM Error";
-    }
-};
 
-class NetworkError : public BaseError
+bool Userinfo::is_member(const std::string &group) const
 {
-public:
-    const char *what() const throw()
-    {
-        printf("Network error");
-        return "Network Error";
-    }
-};
+    return std::binary_search(groups_.cbegin(), groups_.cend(), group);
+}
 
-class TimeoutError : public NetworkError
-{
-public:
-    const char *what() const throw()
-    {
-        printf("Timeout error");
-        return "Timeout Error";
-    }
-};
 
-class ResponseError : public NetworkError
+bool Userinfo::intersects(std::vector<std::string>::const_iterator beg, std::vector<std::string>::const_iterator end) const
 {
-public:
-    const char *what() const throw()
-    {
-        printf("Response error");
-        return "Response Error";
-    }
-};
+    if(!std::is_sorted(beg, end))
+        throw "Cannot happen IYWHQ";
+    std::vector<std::string> target;
+    // Intersection is tidier but needs both its entries to be sorted
+    std::set_intersection(groups_.cbegin(), groups_.cend(), beg, end,
+	    // no CTAD in C++11
+			  std::back_insert_iterator<std::vector<std::string>>(target));
+
+    return !target.empty();
+
+}
+
 
 std::string getQr(const char *text, const int ecc = 0, const int border = 1)
 {
@@ -162,52 +145,33 @@ std::string DeviceAuthResponse::get_prompt(const int qr_ecc = 0)
                << std::endl
                << getQr((complete_url ? verification_uri_complete : verification_uri).c_str(), qr_ecc)
                << std::endl
-               << "Hit enter when you authenticate\n";
+               << "Hit enter when you have finished authenticating\n";
     } else {
-        prompt << "Hit enter when you authenticate\n";
+        prompt << "Hit enter when you have finished authenticating\n";
     }
     return prompt.str();
 }
 
-static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp)
-{
-    ((std::string *)userp)->append((char *)contents, size * nmemb);
-    return size * nmemb;
-}
 
-void make_authorization_request(const Config config,
-                                const char *client_id,
-                                const char *client_secret,
-                                const char *scope,
-                                const char *device_endpoint,
+void make_authorization_request(const Config &config,
+                                pam_oauth2_log &logger,
+                                std::string const &client_id,
+                                std::string const &client_secret,
+                                std::string const &scope,
+                                std::string const &device_endpoint,
                                 DeviceAuthResponse *response)
 {
-    CURL *curl;
-    CURLcode res;
-    std::string readBuffer;
+    pam_oauth2_curl curl(config);
+    pam_oauth2_curl::params params;
+    curl.add_params(params, "client_id", client_id);
+    curl.add_params(params, "scope", scope);
+    std::string result{curl.call(config, device_endpoint, params)};
 
-    curl = curl_easy_init();
-    if (!curl)
-        throw NetworkError();
-    std::string params = std::string("client_id=") + client_id + "&scope=" + scope;
-    if (config.http_basic_auth) {
-        curl_easy_setopt(curl, CURLOPT_USERNAME, client_id);
-        curl_easy_setopt(curl, CURLOPT_PASSWORD, client_secret);
-    } else {
-        params += std::string("&client_secret=") + client_secret;
-    }
-    curl_easy_setopt(curl, CURLOPT_URL, device_endpoint);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, params.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-    res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    if (res != CURLE_OK)
-        throw NetworkError();
     try
     {
-        if (config.client_debug) printf("Response to authorizaation request: %s", readBuffer.c_str());
-        auto data = json::parse(readBuffer);
+        puts(result.c_str());
+        logger.log(pam_oauth2_log::log_level_t::DEBUG, "Response to authorization request: %s\n", result.c_str());
+        auto data = json::parse(result);
         response->user_code = data.at("user_code");
         response->device_code = data.at("device_code");
         response->verification_uri = data.at("verification_uri");
@@ -218,62 +182,44 @@ void make_authorization_request(const Config config,
     }
     catch (json::exception &e)
     {
-        throw ResponseError();
+        throw ResponseError("AuzReq: Couldn't parse auz response from server");
     }
 }
 
-void poll_for_token(const Config config,
-                    const char *client_id,
-                    const char *client_secret,
-                    const char *token_endpoint,
-                    const char *device_code,
+void poll_for_token(Config const &config,
+                    pam_oauth2_log &logger,
+                    std::string const &client_id,
+                    std::string const &client_secret,
+                    std::string const &token_endpoint,
+                    std::string const &device_code,
                     std::string &token)
 {
     int timeout = 300,
         interval = 3;
-    CURL *curl;
-    CURLcode res;
     json data;
-    std::ostringstream oss;
-    std::string params;
 
-    oss << "grant_type=urn:ietf:params:oauth:grant-type:device_code"
-        << "&device_code=" << url_encode(device_code)
-        << "&client_id=" << url_encode(client_id);
-    if (!config.http_basic_auth)
-        oss << "&client_secret=" << client_secret;
-        //
-    params = oss.str();
+    pam_oauth2_curl curl(config);
+
+    pam_oauth2_curl::params params;
+    curl.add_params(params, "grant_type", "urn:ietf:params:oauth:grant-type:device_code");
+    curl.add_params(params, "device_code", device_code);
 
     while (true)
     {
         timeout -= interval;
         if (timeout < 0)
         {
-            throw TimeoutError();
+            throw TimeoutError("Timeout waiting for token");
         }
-        std::string readBuffer;
-        std::this_thread::sleep_for(std::chrono::seconds(interval));
-        curl = curl_easy_init();
-        if (!curl)
-            throw NetworkError();
-        curl_easy_setopt(curl, CURLOPT_URL, token_endpoint);
-        if (config.http_basic_auth) {
-            curl_easy_setopt(curl, CURLOPT_USERNAME, client_id);
-            curl_easy_setopt(curl, CURLOPT_PASSWORD, client_secret);
-        }
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, params.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
 
-        res = curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
-        if (res != CURLE_OK)
-            throw NetworkError();
-        try
+        std::this_thread::sleep_for(std::chrono::seconds(interval));
+
+	std::string result{curl.call(config, token_endpoint, params)};
+
+	try
         {
-            if (config.client_debug) printf("Response from token poll: %s\n", readBuffer.c_str());
-            data = json::parse(readBuffer);
+	    logger.log(pam_oauth2_log::log_level_t::DEBUG, "Response from token poll: %s", result.c_str());
+            data = json::parse(result);
             if (data["error"].empty())
             {
                 token = data.at("access_token");
@@ -287,58 +233,52 @@ void poll_for_token(const Config config,
             {
                 ++interval;
             }
+            else if (data["error"] == "unauthorized")
+            {
+		// DEBUG has already logged this (above), but in this case we do want to log what the server said
+		if(logger.log_level() != pam_oauth2_log::log_level_t::DEBUG)
+		    logger.log(pam_oauth2_log::log_level_t::WARN, "Response from token poll: %s", result.c_str());
+                throw ResponseError("Server denied authorisation");
+            }
             else
             {
-                throw ResponseError();
+                throw ResponseError("Token response: unknown server error");
             }
         }
         catch (json::exception &e)
         {
-            throw ResponseError();
+            throw ResponseError("Token response: could not parse server response");
         }
     }
 }
 
-void get_userinfo(const Config &config,
-                  const char *userinfo_endpoint,
-                  const char *token,
-                  const char *username_attribute,
-                  Userinfo *userinfo)
+
+
+Userinfo
+get_userinfo(const Config &config,
+                  pam_oauth2_log &logger,
+                  std::string const &userinfo_endpoint,
+                  std::string const &token,
+                  std::string const &username_attribute)
 {
-    CURL *curl;
-    CURLcode res;
-    std::string readBuffer;
+    pam_oauth2_curl curl(config);
 
-    curl = curl_easy_init();
-    if (!curl)
-        throw NetworkError();
-    curl_easy_setopt(curl, CURLOPT_URL, userinfo_endpoint);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-
-    std::string auth_header = "Authorization: Bearer ";
-    auth_header += token;
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, auth_header.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-    res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    if (res != CURLE_OK)
-        throw NetworkError();
+    std::string result{curl.call(config, userinfo_endpoint, pam_oauth2_curl::credential(token))};
     try
     {
-        if (config.client_debug) printf("Userinfo token: %s\n", readBuffer.c_str());
-        auto data = json::parse(readBuffer);
-        userinfo->sub = data.at("sub");
-        userinfo->username = data.at(username_attribute);
-        userinfo->name = data.at("name");
-        userinfo->groups = data.at("groups").get<std::vector<std::string>>();
+	// we do an extra if since the c_str could be expensive
+	if(logger.log_level() == pam_oauth2_log::log_level_t::DEBUG)
+	    logger.log(pam_oauth2_log::log_level_t::DEBUG, "Userinfo token: %s", result.c_str());
+        auto data = json::parse(result);
+        Userinfo ui(data.at("sub"), data.at(username_attribute), data.at("name"));
+        ui.set_groups( data.at("groups").get<std::vector<std::string>>() );
+        return ui;
     }
     catch (json::exception &e)
     {
-        throw ResponseError();
+        throw ResponseError("Userinfo: could not parse server response");
     }
+    throw "Cannot happen QPAIJ";
 }
 
 void show_prompt(pam_handle_t *pamh,
@@ -355,7 +295,7 @@ void show_prompt(pam_handle_t *pamh,
 
     pam_err = pam_get_item(pamh, PAM_CONV, (const void **)&conv);
     if (pam_err != PAM_SUCCESS)
-        throw PamError();
+        throw PamError("Prompt: failed to get PAM_CONV");
     prompt = device_auth_response->get_prompt(qr_error_correction_level);
     msg.msg_style = PAM_PROMPT_ECHO_OFF;
     msg.msg = prompt.c_str();
@@ -378,128 +318,157 @@ void show_prompt(pam_handle_t *pamh,
         free(response);
 }
 
-bool is_authorized(Config *config,
-                   const char *username_local,
-                   Userinfo *userinfo)
+bool is_authorized(Config const &config,
+                   pam_oauth2_log &logger,
+                   std::string const &username_local,
+                   Userinfo const &userinfo,
+                   char const *metadata_path = nullptr)
 {
-    const char *username_remote = userinfo->username.c_str();
     Metadata metadata;
 
-    // Try and see if any IAM groups the user is a part of are also linked to the OpenStack project this VM is a part of
-    if (config->cloud_access)
+    // utility username check used by cloud_access and group_access
+    auto check_username = [&config](std::string const &remote, std::string local) -> bool
     {
+	local += config.local_username_suffix;
+	return remote == local;
+    };
 
+    // Try and see if any IAM groups the user is a part of are also linked to the OpenStack project this VM is a part of
+    if (config.cloud_access && check_username(config.cloud_username, username_local))
+    {
         try
         {
-            metadata.load("/mnt/context/openstack/latest/meta_data.json");
+            // The default path for the metadata file (containing project_id) was hardcoded into previous versions
+	    // TODO no longer needed
+            constexpr const char *legacy_metadata_path = "/mnt/context/openstack/latest/meta_data.json";
+            if(!metadata_path) {
+                if(config.metadata_file.empty()) {
+		    logger.log(pam_oauth2_log::log_level_t::WARN, "using hardwired legacy metadata (configure \"metadata_file\" in the \"cloud\" section in config)");
+		    metadata_path = legacy_metadata_path;
+		} else {
+                    metadata_path = config.metadata_file.c_str();
+                }
+            }
+            metadata.load( metadata_path );
         }
         catch (json::exception &e)
         {
             // An exception means it's probably safer to not allow access
-            throw PamError();
+            throw ConfigError("Is_Auz/cloud: Failed to parse project_id in config:cloud.metadata_file");
         }
 
-        CURL *curl;
-        CURLcode res;
-        std::string readBuffer;
+	pam_oauth2_curl curl(config);
 
-        curl = curl_easy_init();
-        if (!curl)
-            throw NetworkError();
-        curl_easy_setopt(curl, CURLOPT_URL, config->cloud_endpoint.append("/").append(metadata.project_id).c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+	std::string url{config.cloud_endpoint};
+	url.append("/");
+	url.append(metadata.project_id);
 
-        res = curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
-        if (res != CURLE_OK)
-            throw NetworkError();
+	// Call with empty credential
+	std::string result{curl.call(config, url, pam_oauth2_curl::credential())};
         try
         {
-            if (config->client_debug) printf(readBuffer.c_str());
-            auto data = json::parse(readBuffer);
+	    // Extra if in case c_str is expensive -
+	    if(logger.log_level() == pam_oauth2_log::log_level_t::DEBUG)
+		logger.log(pam_oauth2_log::log_level_t::DEBUG, result.c_str());
+            auto data = json::parse(result);
             std::vector<std::string> groups = data.at("groups").get<std::vector<std::string>>();
-            for (auto &group : groups)
-            {
-                for (auto &user_group : userinfo->groups)
-                {
-                    if (group.compare(user_group) == 0 && config->cloud_username.compare(std::string(username_local) + config->local_username_suffix) == 0)
-                    {
-                        // One of the users IRIS IAM groups matches one of the project groups, and they are trying to login with a valid username
-                        return true;
-                    }
-                }
-            }
+            std::sort(groups.begin(), groups.end());
+
+	    // If server's view of groups overlaps with the user's groups (userinfo.groups already sorted)
+	    if(userinfo.intersects(groups.cbegin(), groups.cend()))
+	    {
+		logger.log(pam_oauth2_log::log_level_t::INFO, "cloud access: %s is authorised\n", username_local.c_str());
+	        return true;
+	    }
         }
         catch (json::exception &e)
         {
-            throw ResponseError();
+            throw ResponseError("Is_Auz/cloud: failed to parse allowed groups from server");
         }
     }
 
-    // Try to authorize againt group name in userinfo
-    if (config->group_access)
+    // Try to authorize against group name in userinfo
+    if ( config.group_access \
+	 && check_username(userinfo.username(), username_local) \
+	 && userinfo.is_member(config.group_service_name) )
     {
-        for (auto &group : userinfo->groups)
-        {
-            // is service name in group name? THEN do the split, otherwise ignore
-            //if (group.find(config->group_service_name) != std::string::npos)
-            if (group.compare(config->group_service_name) == 0)
-            {
-                /*std::regex reg("/");
-
-                std::sregex_token_iterator iter(group.begin(), group.end(), reg, -1);
-                std::sregex_token_iterator end;
-
-                std::vector<std::string> vec(iter, end);
-
-                // Check if our service name matches the group service name AND the local username matches the group service username
-                if (vec[0].compare(config->group_service_name) == 0 && strcmp(vec[1].c_str(), username_local) == 0)
-                {
-                    return true;
-                }*/
-                if (std::string(username_local).compare(std::string(username_remote) + config->local_username_suffix) == 0) {
-                    return true;
-                }
-            }
-        }
+	logger.log(pam_oauth2_log::log_level_t::INFO, "group access: %s is authorised\n", username_local.c_str());
+	return true;
     }
 
-    // Try to authorize against local config
-    if (config->usermap.count(username_remote) > 0)
+    // Try to authorize against local config, looking for the remote username...
+    std::map<std::string,std::set<std::string>>::const_iterator local = config.usermap.find(userinfo.username());
+    // if present, check if it contains the local username(s)
+    if(local != config.usermap.cend())
     {
-        if (config->usermap[username_remote].count(username_local) > 0)
+        std::string u{username_local};
+        if( local->second.find(u) != local->second.cend() )
         {
+	    logger.log(pam_oauth2_log::log_level_t::INFO, "usermap: %s is authorised\n", username_local.c_str());
             return true;
         }
     }
 
     // Try to authorize against LDAP
-    if (!config->ldap_host.empty())
+    if (!config.ldap_host.empty())
     {
-        size_t filter_length = config->ldap_filter.length() + strlen(username_remote) + 1;
+	std::string uname = userinfo.username();
+	const char *username_remote = uname.c_str();
+	int scope = ldap_scope_value(config.ldap_scope.c_str());
+	if(scope < -1) {
+	    throw ConfigError("Failed to parse LDAP scope");
+	}
+
+	size_t filter_length = config.ldap_filter.length() + strlen(username_remote) + 1;
         char *filter = new char[filter_length];
-        snprintf(filter, filter_length, config->ldap_filter.c_str(), username_remote);
-        int rc = ldap_check_attr(config->ldap_host.c_str(), config->ldap_basedn.c_str(),
-                                 config->ldap_user.c_str(), config->ldap_passwd.c_str(),
-                                 filter, config->ldap_attr.c_str(), username_local);
+        snprintf(filter, filter_length, config.ldap_filter.c_str(), username_remote);
+        int rc = ldap_check_attr(logger.get_pam_handle(), ldap_log_level(logger.log_level()),
+				 config.ldap_host.c_str(), config.ldap_basedn.c_str(), scope,
+                                 config.ldap_user.c_str(), config.ldap_passwd.c_str(),
+                                 filter, config.ldap_attr.c_str(), username_local.c_str());
         delete[] filter;
-        if (rc == LDAPQUERY_TRUE)
+        if (rc == LDAPQUERY_TRUE) {
+	    logger.log(pam_oauth2_log::log_level_t::INFO, "ldap: %s is authorised", username_remote);
             return true;
+        }
     }
 
+    logger.log(pam_oauth2_log::log_level_t::INFO, "is_authorized: %s is not authorised\n", username_local.c_str());
     return false;
 }
+
 
 /* expected hook */
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
+    char const *local_user;
+    if (pam_get_user(pamh, &local_user, "Username: ") != PAM_SUCCESS)
+	return PAM_CRED_INSUFFICIENT;
+    Config config;
+    pam_oauth2_log logger(pamh, pam_oauth2_log::log_level_t::INFO);
+
+    if(!parse_args(config, flags, argc, argv, logger))
+	return PAM_SYSTEM_ERR;
+    if(bypass(config, logger, local_user))
+	return PAM_IGNORE;
+
     return PAM_SUCCESS;
 }
 
 /* expected hook */
 PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const char **argv)
 {
+    char const *local_user;
+    if (pam_get_user(pamh, &local_user, "Username: ") != PAM_SUCCESS)
+	return PAM_CRED_INSUFFICIENT;
+    Config config;
+    pam_oauth2_log logger(pamh, pam_oauth2_log::log_level_t::INFO);
+
+    if(!parse_args(config, flags, argc, argv, logger))
+	return PAM_SYSTEM_ERR;
+    if(bypass(config, logger, local_user))
+	return PAM_IGNORE;
+
     return PAM_SUCCESS;
 }
 
@@ -510,48 +479,158 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     std::string token;
     Config config;
     DeviceAuthResponse device_auth_response;
-    Userinfo userinfo;
+    // Current default log level is INFO
+    pam_oauth2_log logger(pamh, pam_oauth2_log::log_level_t::INFO);
 
-    try
-    {
-        (argc > 0) ? config.load(argv[0]) : config.load("/etc/pam_oauth2_device/config.json");
-    }
-    catch (json::exception &e)
-    {
-        printf("Failed to load config.\n");
-        return PAM_AUTH_ERR;
-    }
+    if(!parse_args(config, flags, argc, argv, logger))
+	return PAM_AUTH_ERR;
 
     try
     {
         if (pam_get_user(pamh, &username_local, "Username: ") != PAM_SUCCESS)
-            throw PamError();
+            throw PamError("PAM_AUTH: could not get local username");
+
+	if(bypass(config, logger, username_local))
+	    return PAM_IGNORE;
+
         make_authorization_request(
             config,
-            config.client_id.c_str(), config.client_secret.c_str(),
-            config.scope.c_str(), config.device_endpoint.c_str(),
+            logger,
+            config.client_id, config.client_secret,
+            config.scope, config.device_endpoint,
             &device_auth_response);
         show_prompt(pamh, config.qr_error_correction_level, &device_auth_response);
-        poll_for_token(config, config.client_id.c_str(), config.client_secret.c_str(),
-                       config.token_endpoint.c_str(),
-                       device_auth_response.device_code.c_str(), token);
-        get_userinfo(config, config.userinfo_endpoint.c_str(), token.c_str(),
-                     config.username_attribute.c_str(), &userinfo);
+        poll_for_token(config, logger,
+		       config.client_id, config.client_secret,
+                       config.token_endpoint,
+                       device_auth_response.device_code, token);
+        Userinfo ui{get_userinfo(config, logger, config.userinfo_endpoint, token,
+				 config.username_attribute)};
+	if (is_authorized(config, logger, username_local, ui)) {
+	    logger.log(pam_oauth2_log::log_level_t::INFO, "%s is authorised", username_local);
+	    return PAM_SUCCESS;
+	}
     }
-    catch (PamError &e)
+    catch(BaseError const &e)
     {
+	logger.log(e);
+	return e.pam_error();
+    }
+    catch(std::exception const &e)
+    {
+        logger.log(pam_oauth2_log::log_level_t::ERR, "Caught system exception (this is bad)");
+        logger.log(pam_oauth2_log::log_level_t::ERR, e.what());
         return PAM_SYSTEM_ERR;
     }
-    catch (TimeoutError &e)
+    catch(char const *msg)
     {
-        return PAM_AUTH_ERR;
+        logger.log(pam_oauth2_log::log_level_t::ERR, "Caught cannot-happen exception(this is very bad)");
+        logger.log(pam_oauth2_log::log_level_t::ERR, msg);
+        return PAM_SYSTEM_ERR;
     }
-    catch (NetworkError &e)
-    {
-        return PAM_AUTH_ERR;
-    }
-
-    if (is_authorized(&config, username_local, &userinfo))
-        return PAM_SUCCESS;
     return PAM_AUTH_ERR;
 }
+
+
+
+bool
+parse_args(Config &config, [[maybe_unused]] int flags, int argc, const char **argv, pam_oauth2_log &logger)
+{
+    try
+    {
+        // TODO reallow override in argv
+        config.load(config_path);
+    }
+    catch (json::exception &e)
+    {
+	logger.log(pam_oauth2_log::log_level_t::ERR, "Failed to load config:");
+	logger.log(pam_oauth2_log::log_level_t::ERR, e.what());
+	return false;
+    }
+
+    if(config.client_debug)
+    {
+	logger.set_log_level(pam_oauth2_log::log_level_t::DEBUG);
+	logger.log(pam_oauth2_log::log_level_t::DEBUG, "config enabled debug");
+    }
+    // FIXME make smarter: For now we just look for "debug" as it is a common argument to PAM modules
+    // TODO Note the config file can also assert debug for now
+    for(int i = 1; i < argc; ++i)
+        if(!strcasecmp(argv[i], "debug"))
+        {
+            config.client_debug = true;
+            logger.set_log_level(pam_oauth2_log::log_level_t::DEBUG);
+	    logger.log(pam_oauth2_log::log_level_t::DEBUG, "pam config enabled debug");
+        }
+
+    if(flags & PAM_SILENT)
+        logger.set_log_level(pam_oauth2_log::log_level_t::OFF);
+
+    return true;
+}
+
+
+
+bool
+bypass(Config const &config, pam_oauth2_log &logger, char const *local_user)
+{
+    if(config.ldap_host.empty() && config.ldap_preauth.empty())
+	return false;
+    int scope = ldap_scope_value(config.ldap_scope.c_str());
+    if(scope < -1)
+	throw ConfigError("Failed to interpret LDAP scope");
+
+    // Since %s gets substituted we don't actually need the +1, nitpicking fans
+    size_t len = config.ldap_preauth.size() + strlen(local_user) + 1;
+    char *query = new char[len];
+    if(!query)
+    {
+	// if we're out of memory, we're probably in trouble
+	logger.log(pam_oauth2_log::log_level_t::ERR, "bypass failed malloc");
+	throw std::bad_alloc();
+    }
+
+    // .c_str() is noexcept from C++ onwards
+    snprintf(query, len, config.ldap_preauth.c_str(), local_user);
+
+    logger.log(pam_oauth2_log::log_level_t::DEBUG, "LDAP preauth query \"%s\"", query);
+    int rc = ldap_bool_query(logger.get_pam_handle(), ldap_log_level(logger.log_level()),
+			     config.ldap_host.c_str(), config.ldap_basedn.c_str(), scope,
+			     config.ldap_user.c_str(), config.ldap_passwd.c_str(), query);
+    switch(rc)
+    {
+	case LDAPQUERY_FALSE:
+	    logger.log(pam_oauth2_log::log_level_t::INFO, "Bypass false for %s", local_user);
+	    return false;
+	case LDAPQUERY_TRUE:
+	    logger.log(pam_oauth2_log::log_level_t::INFO, "Bypass true for %s", local_user);
+	    return true;
+	case LDAPQUERY_ERROR:
+	    logger.log(pam_oauth2_log::log_level_t::ERR, "bypass LDAP error");
+	    return false;
+	default:
+	    throw "cannot happen UQYDA";
+    }
+}
+
+
+
+enum ldap_loglevel_t
+ldap_log_level(pam_oauth2_log::log_level_t log)
+{
+    switch(log)
+    {
+    case pam_oauth2_log::log_level_t::DEBUG:
+	return LDAP_LOGLEVEL_DEBUG;
+    case pam_oauth2_log::log_level_t::INFO:
+	return LDAP_LOGLEVEL_INFO;
+    case pam_oauth2_log::log_level_t::WARN:
+	return LDAP_LOGLEVEL_WARN;
+    case pam_oauth2_log::log_level_t::ERR:
+	return LDAP_LOGLEVEL_ERR;
+    case pam_oauth2_log::log_level_t::OFF:
+	return LDAP_LOGLEVEL_OFF;
+    }
+    throw "cannot happen ATQND";
+}
+

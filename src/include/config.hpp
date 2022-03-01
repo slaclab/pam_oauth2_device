@@ -18,14 +18,19 @@ public:
         username_attribute,
         ldap_host,
         ldap_basedn,
+	ldap_scope,
         ldap_user,
         ldap_passwd,
+	ldap_preauth,
         ldap_filter,
         ldap_attr,
+	tls_ca_path,
+	tls_ca_bundle,
         group_service_name,
         cloud_endpoint,
         cloud_username,
-        local_username_suffix;
+        local_username_suffix,
+        metadata_file;
     int qr_error_correction_level;
     bool group_access,
          cloud_access,
