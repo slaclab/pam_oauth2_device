@@ -136,6 +136,16 @@ This part of the module functionality carries a lot of legacy stuff; see the Aut
 5 The 'cloud' section implements a callout to a server to fetch a group membership file
 6 The 'users' section provides mappings from the username attribute (selected with username\_attribute) to a local user id.
 
+### Bypass
+
+The module provides a feature for bypassing authentication altogether, letting the process fall through to the next PAM
+module in the stack (provided the PAM authentication is configured correctly; see the HOWTO for further details.)  A
+typical use case is to treat root logins separately.
+
+There are currently two ways of bypassing; one is an LDAP lookup based on the "preauth" query, and the other is a
+special 'users' section where the remote username is the magic string `*bypass*`; if the local username is in this
+section, the PAM module is bypassed.  See the HOWTO for further details.
+
 ### Deprecated?
 
 - Future releases should change the `client_debug` to loglevel.

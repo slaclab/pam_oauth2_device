@@ -33,7 +33,10 @@ constexpr char const *config_path = "/etc/pam_oauth2_device/config.json";
 //! Function to parse the PAM args (as supplied in the PAM config), updating our config
 bool parse_args(Config &config, int flags, int argc, const char **argv, pam_oauth2_log &logger);
 
-//! Call LDAP to ask if we are to bypass the pam_sm_* call for a given local_user
+// Magic string for 'users' section to define local users for whom we bypass the module (eg root)
+static const std::string magic_bypass("*bypass*");
+
+//! Check if we are to bypass the pam_sm_* call for a given local_user
 bool bypass(Config const &, pam_oauth2_log &, char const *);
 
 //! Translate from C++'s log level (as defined in pam_oauth2_log) to a C one used by LDAP
@@ -574,6 +577,17 @@ parse_args(Config &config, [[maybe_unused]] int flags, int argc, const char **ar
 bool
 bypass(Config const &config, pam_oauth2_log &logger, char const *local_user)
 {
+    // check whether any specific user should be bypassed
+    auto const bypass = config.usermap.find(magic_bypass);
+    if(bypass != config.usermap.cend()) {
+	std::string local(local_user);
+	// *bypass is a pair of string, set-of-local-usernames
+	if(bypass->second.find(local) != bypass->second.cend()) {
+	    logger.log(pam_oauth2_log::log_level_t::INFO, "bypass %s", local_user);
+	    return true;
+	}
+    }
+
     if(config.ldap_host.empty() && config.ldap_preauth.empty())
 	return false;
     int scope = ldap_scope_value(config.ldap_scope.c_str());
@@ -590,7 +604,7 @@ bypass(Config const &config, pam_oauth2_log &logger, char const *local_user)
 	throw std::bad_alloc();
     }
 
-    // .c_str() is noexcept from C++ onwards
+    // .c_str() is noexcept from C++11 onwards
     snprintf(query, len, config.ldap_preauth.c_str(), local_user);
 
     logger.log(pam_oauth2_log::log_level_t::DEBUG, "LDAP preauth query \"%s\"", query);
