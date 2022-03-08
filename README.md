@@ -8,16 +8,19 @@ This module will then check if you're in the right group(s) or have a specified 
 
 A demo video is avaliable here: https://drive.google.com/file/d/1WzDRL0RFDXfvUgabbXNzBppV-DKXyUN1/view?usp=sharing
 
-This code was originally developed by Mazarykova Univerzita and has been refactored by UKRI-STFC.
+This code was originally developed by [Mazarykova Univerzita](https://github.com/ICS-MU/pam_oauth2_device) and [this branch](https://github.com/stfc/pam_oauth2_device) has been refactored by UKRI-STFC as a part of the [IRIS](https://www.iris.ac.uk/) activity.
 
 ## Build
 
 The upstream build uses basic `make` and we have stuck with this for compatibility reasons.
 The two basic targets are `make` and `make test`; the latter will build (some of) the tests and run them.
-Note that at present some of the integration tests are failing.
+
+* Note that at present some of the integration tests are failing.
+* Note you can build RPMs and DEBs, though currently they are designed for CentOS7 and Ubuntu 18.04 respectively.
+  * The build currently requires Docker (or compatible)
 
 
-### Build on Scientific Linux or CentOS7
+### Manual Build on Scientific Linux or CentOS7
 
 ```
 yum install epel-release
@@ -45,7 +48,9 @@ To install the module, copy `pam_oauth2_device.so` into the PAM modules director
 On Debian-based systems, this would be `/lib/x86_64-linux-gnu/security` whereas CentOS and related flavours would use `/usr/lib64/security`.  If in doubt, check `dpkg --L libpam-modules` or `rpm -ql pam` respectively.
 
 
-## User names
+## Configuration
+
+### User names
 
 Usernames are mentioned several times in this document and could probably get a bit confusing.  This section attempts to give a short explanation.
 
@@ -57,6 +62,91 @@ The **remote user name** is the corresponding name for the user as held by the I
 
 The **account name** is the name of the local Unix account that the user is mapped into once they have authenticated.  By default, it is the same as the local user name.
 
+### Summary of Configuration Options
+
+The template `config_template.json` should give an outline of the configuration file.
+
+The configuration should be installed at `/etc/pam_oauth2_device/config.json` (a future release should make it configurable, to allow different modules to coexist).
+
+As the name suggests, the file is in JSON, so it is recommended to check it with a JSON validator like `jq` after editing it (the PAM module will refuse to load an invalid JSON file, but you will not see this error till runtime.)
+
+Thus, at the top level, there is a single object with a number of entries, described as "sections" in the table:
+
+#### Table 1: Configuring Authentication Flow
+
+| Section | Entry | Type | Req'd | Description | Notes |
+| --- | --- | --- | --- | --- | --- |
+| oauth | | Object | Y | | |
+| oauth | client | Object | Y | Contains "id" and "secret" | |
+| oauth | scope | String | Y | OIDC scope | Note 1 |
+| oauth | device\_endpoint | String | Y | Device endpoint | https://${url}/devicecode |
+| oauth | token\_endpoint | String | Y | Token endpoint | https://${url}/token |
+| oauth | userinfo\_endpoint | String | Y | Userinfo | https://${url}/userinfo |
+| oauth | username\_attribute | String | Y | Attribute for remote username | |
+| oauth | local\_username\_suffix | String | Y | See usernames | |
+| tls | | Object | Y | | |
+| tls | ca\_bundle | String | N | Concatenated list of trust anchors | Note 2 |
+| tls | ca\_path | String | N | Directory with trust anchors | Note 2 |
+| qr | | Object | N | | |
+| qr | error\_correction\_level | Int | Y | QR code | Note 3 |
+
+Notes:
+
+1 The string value should have a _space separated_ list of scopes which must include `offline_access`
+2 If present, the "ca\_bundle" must be a file with PEM-formatted trust anchors (CA certificates) concatenated together.
+   * "ca\_path" works only with OpenSSL
+   * On the target system, use `curl -V` to see whether curl uses OpenSSL or NSS
+   * If both ca\_path and ca\_bundle are present, the latter takes precedence
+3 The QR code section is optional but if present, it must have the error correction level defined.  Permitted values are 1 (low), 2 (medium), 3 (high) or -1 (disabled).  If the section is missing, the QR code is disabled.
+4 The "${url}" above would be the URL (hostname) of your OpenID Provider.  Its host certificate must be valid when checked against the CA bundle (see item 2)
+
+#### Table 2: Configuring Authorisation Flow
+
+No authorisation section is required, although if included there will be necessary entries in the section.  However, if no authorisation section is provided, the user will not be able to log in.
+
+This part of the module functionality carries a lot of legacy stuff; see the Authorisation section for discussion.
+
+| Section | Entry | Type | Req'd | Description | Notes |
+| --- | --- | --- | --- | --- | --- |
+| ldap | | Object | N | LDAP configuration | |
+| ldap | host | String | Y | LDAP URL | |
+| ldap | basedn | String | Y | Base DN | Note 1 |
+| ldap | user | String | Y | username | Note 2 |
+| ldap | passwd | String | Y | password | Note 2 |
+| ldap | scope | String | N | | Note 3 |
+| ldap | preauth | String | N | | |
+| ldap | filter | String | Y | | |
+| ldap | attr | String | Y | | |
+| group | | Object | N | | |
+| group | access | boolean | Y | Whether to use this section | |
+| group | service\_name | String | Y | | Note 4 |
+| cloud | | Object | N | | |
+| cloud | access | boolean | Y | Whether to use this section | |
+| cloud | endpoint | String | Y | | Note 5 |
+| cloud | username | String | Y | endpoint username | Note 5 |
+| cloud | metadata\_file | String | Y | | Note 5 |
+| users | | Object | N | User Mapping section | Note 6 |
+
+1 The base DN, least significant RDN first
+2 Username and password are for authentication to the LDAP server, if used; if not used, just leave them as empty strings
+3 scope is one of 'sub'/'subtree', 'one'/'onelevel' or 'base'/'baseobject'
+  - If the LDAP implementation supports 'subordinate' or 'children' (these are synonymous) then these are available as scopes as well
+  - The default is 'sub'
+4 The service name is a string, which should name a group
+5 The 'cloud' section implements a callout to a server to fetch a group membership file
+6 The 'users' section provides mappings from the username attribute (selected with username\_attribute) to a local user id.
+
+### Deprecated?
+
+- Future releases should change the `client_debug` to loglevel.
+  - Additionally, adding `debug` to the PAM config should enable debug, as expected for a PAM module
+- The metadata file called `project_id` currently has a backwards compatible default of `/mnt/context/openstack/latest/meta_data.json`
+
+
+## Authorisation
+
+The major refactoring of the module in Sep 2021 preserved (and bugfixed) the existing authorisation functionality.  However, the user should be warned that it is subject to revision, but generally preserving backward functionality if possible.
+
 ### Comprehensive Example
 
 As above, user Fred Bloggs logs in with `ssh fred@example.com`.  The host at `example.com` asks Fred to authenticate.  Once successfully, it calls out to IAM to obtain the userinfo structure.  From this it picks the attribute specified with `username_attribute` in the configuration, `preferred_username`, say.  Let's say the value of `preferred_username` of Fred's userinfo structure is `bloggs`.  Additionally, the userinfo structure contains the list of groups "users", "iris" and "cloud".
@@ -66,7 +156,7 @@ Throughout the rest of this section, it is assumed that Fred has authenticated s
 If the **cloud** section is configured and `access` is true, a local file configured as the `metadata_file` is read.  This file should contain the structure
 
 ```
-{"project_id": "fleeps"}
+{"project\_id": "fleeps"}
 ```
 
 The module adds the string `fleeps` to the endpoint (with a slash) and calls the server (with *no* client authentication) to see what is at the endpoint.  It expects a JSON structure as response, structured like
@@ -106,7 +196,7 @@ Make sure the module works correctly before changing your SSH config or you may 
 Edit `/etc/pam.d/sshd` and comment out the other `auth` sections (unless you need MFA or something else).
 
 ```
-auth required pam_oauth2_device.so /etc/pam_oauth2_device/config.json
+auth required pam_oauth2_device.so
 ```
 
 Edit `/etc/ssh/sshd_config` and make sure that the following configuration options are set
@@ -120,47 +210,13 @@ UsePAM yes
 systemctl restart sshd
 ```
 
-## Configuration config.json
-
-The configuration should be located at `/etc/pam_oauth2_device/config.json`.  The file in the distro `config_template.json` should get you started.
-
-As the name suggests, the file is in JSON, so it is recommended to check it with a JSON validator like `jq` after editing it (the PAM module will refuse to load an invalid JSON file, but you will not see this error till runtime.)
-
-The file is divided into the following sections (each encoded as a JSON object).  A table below summarises all the options.
-
-**oauth** - required section for your OAuth2 client configuration. You will be able to get most configuration attributes from your IAM administrator. The ```local_username_suffix``` option is used within the cloud and group configuration sections. If added, it appends this suffix to all username checks. e.g. if the suffix is set to "_irisiam" then it is expected that usernames on the system will follow the format: "<iam-username>_irisiam".  This feature makes it possible to have account names on the system all ending with the same suffix, thus avoiding clashes with any other system account.  The `username_attribute` describes which attribute from IAM's Userinfo structure is used as IAM's view of the username.
-
-**tls** describes the TLS (transport layer security, previously known as SSL) parameters as they apply to both HTTPS and LDAPS connections.
-
-**ldap** - optional section which activates the LDAP logic (see below for description).
-
-**qr** - allowed correction levels are
-
-  * -1 - no QR printed
-  * 0 - low
-  * 1 - medium
-  * 2 - high
-
-If no **qr** information is provided, one isn't printed.
-
-**group** - if enabled, on login the users IAM groups will be checked against the group specified. If they are in this group, they will be allowed in with their IAM username (plus a suffix if set above). e.g. if the group is set to "my-service", any IAM user in the group "my-service" will be allowed access. If a user is ONLY in a subgroup, e.g. "my-service/special", they will NOT be allowed access.
-
-**cloud** - this is designed for VMs in the STFC cloud. For this to work, the module will need to be installed on an OpenStack VM, and be enabled. The **group** section should be disabled. All OpenStack VMs will be part of a project on the OpenStack service. If the user logging in is in an IRIS IAM group which the VM project is a part of, then they will be allowed into the shared account specified.
-e.g. The user is trying to access the shared "centos" account, which has been specified using the "username" attribute. The VM is in the IRIS AAI project in OpenStack, which maps to the IAM group "iris-iam-admins". If the user trying to gain access is in the "iris-iam-admins" IAM group, then they will be allowed access to the "centos" account.
-
-The "endpoint" attribute should be set to the location of the irisiam-mapper.py CGI script.
-
-**users** - user mapping. From claim configured in *username_attribute* to the local account name. e.g. you could map the IAM username "willfurnell" or "will.furnell@stfc.ac.uk" to the local account "root". This must be done on a per-user basis, so isn't suitable for large numbers of users.
-
-**client_debug** - boolean value; if set to true, additional debugging information is printed to stdout by the module.  Useful for debugging (a future release will change this to a loglevel rather than a boolean, as internally the module distinguishes between debug, info, warn, error)
-
 ## Testing the module works
 
 You are advised to do this before making changes to your main SSH config.  There are two tests to do which are recommended to do in the order described here.
 
 ### Preparing for the tests
 
-It is recommended that you create a hardlink to your `sshd` called (for example) `pamsshd`, e.g. `/usr/local/sbin/pamsshd`.  This means you can have a PAM configuration for `pamsshd` which is different from the normal `sshd`.
+It is recommended that you create a (hard or sym) link to your `sshd` called (for example) `pamsshd`, e.g. `/usr/local/sbin/pamsshd`.  This means you can have a PAM configuration for `pamsshd` which is different from the normal `sshd`.
 
 In this case you can copy `/etc/pam.d/sshd` to `/etc/pam.d/pamsshd` and edit the latter, leaving the former to log you back into the system if something goes wrong.  Also copy `/etc/ssh/sshd_config` to `/etc/ssh/pamsshd_config` so you can edit the configuration for `pamsshd` separately.
 
@@ -176,7 +232,8 @@ pamtester -v pamtester localusername authenticate
 ```
 and follow the onscreen prompts.  Here, `localusername` refers to your local user name so replace it with whatever your name is.
 
-You can check `/var/log/secure` or `/var/log/auth.log` to find what's wrong if there are errors authenticating.
+You can check `/var/log/secure` or `/var/log/auth.log` to find what's wrong if there are errors authenticating.  While the module
+uses syslog, syslog is normally set up to log PAM stuff into one of these files.
 
 ### Test 2: sshd
 
@@ -190,57 +247,4 @@ This should start `sshd` with the name `pamsshd` listening on port 2222.  Now tr
 
 Again check the logs as in the previous tests.
 
-
-## Overview of Configuration Options
-
-Note that values can be listed as *required* in a section but the whole section can be omitted.  For example, if LDAP is not used, it is possible to omit the entire LDAP section.  If it is *not* omitted, the value of `host` MUST be present.  The value can be an empty string, in which case the LDAP section is again bypassed.
-
-| Section | Attribute | Req'd? | Value | Default |
-| --- | --- | --- | --- | --- |
-| `oauth` | (section) | Yes | Configuration for OIDC client | - |
-| `oauth` | `client` | Yes | Object containing `id` and `secret` | None |
-| `oauth` | `scope` | Yes | OIDC scope(s) | None |
-| `oauth` | `device_endpoint` | Yes | OIDC device endpoint | None |
-| `oauth` | `token_endpoint` | Yes | OIDC token endpoint | None |
-| `oauth` | `userinfo_endpoint` | Yes | OIDC userinfo endpoint | None |
-| `oauth` | `username_attribute` | Yes | Attribute from userinfo to use as remote username | None |
-| `oauth` | `local_username_suffix` | Yes | Suffix (see username section) | empty string |
-| --- | --- | --- | --- | --- |
-| `tls` | (section) | No | TLS parameters | - |
-| `tls` | `ca_path` | Yes | Repository with hashed names of trusted CA certs | `/etc/grid-security/certificates` |
-| --- | --- | --- | --- | --- |
-| `ldap` | (section) | No | LDAP parameters | - |
-| `ldap` | `host` | Yes | LDAP host URL (ldap or ldaps schema) | None |
-| `ldap` | `basedn` | Yes | LDAP base | None |
-| `ldap` | `user` | No | LDAP client username | empty string |
-| `ldap` | `passwd` | No | LDAP client password | empty string |
-| `ldap` | `scope` | No | LDAP search scope | subtree |
-| `ldap` | `filter` | Yes | LDAP search filter with %s for remote username | None |
-| `ldap` | `attr` | Yes | Attribute expected to contain the local username | None |
-| `ldap` | `preauth` | No | preauth bypass check | disabled |
-| --- | --- | --- | --- | --- |
-| `cloud` | (section) | No | Cloud section | - |
-| `cloud` | `access` | Yes | Check enabled (true/false)? | None |
-| `cloud` | `endpoint` | Yes | Endpoint to query project group | None |
-| `cloud` | `username` | Yes | Currently not used, but required... | None |
-| `cloud` | `metadata_file` | No | Location of metadata file | See below |
-| --- | --- | --- | --- | --- |
-| `group` | (section) | No | Group membership check | - |
-| `group` | `access` | Yes | Check enabled (true/false)? | None |
-| `group` | `service_name` | Yes | Name of group | None |
-| --- | --- | --- | --- | --- |
-| `users` | (section) | No | Usermap section | - |
-| `users` | username | Yes | array of local usernames | None |
-| --- | --- | --- | --- | --- |
-| `qr` | (section) | No | QR code error correction | Disable QR |
-| `qr` | `error_correction_level` | Error correction (0 to 2) | Disable QR |
-| --- | --- | --- | --- | --- |
-| `client_debug` | (entry) | No | true/false for debug | debug off |
-| --- | --- | --- | --- | --- |
-
-### Deprecated?
-
-- Future releases should change the `client_debug` to loglevel.
-  - Additionally, adding `debug` to the PAM config should enable debug, like for a normal PAM module
-- The metadata file called `project_id` currently has a backwards compatible default of `/mnt/context/openstack/latest/meta_data.json`
 
