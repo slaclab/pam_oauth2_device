@@ -272,9 +272,15 @@ get_userinfo(const Config &config,
 	// we do an extra if since the c_str could be expensive
 	if(logger.log_level() == pam_oauth2_log::log_level_t::DEBUG)
 	    logger.log(pam_oauth2_log::log_level_t::DEBUG, "Userinfo token: %s", result.c_str());
-        auto data = json::parse(result);
+        auto const data = json::parse(result);
+	auto const the_end = data.end();
+	if(data.find("sub") == the_end || data.find("name") == the_end)
+	    throw "userinfo lacks 'sub' or 'name'";
+	if(data.find(username_attribute) == the_end)
+	    throw "username_attribute not found in userinfo object";
         Userinfo ui(data.at("sub"), data.at(username_attribute), data.at("name"));
-        ui.set_groups( data.at("groups").get<std::vector<std::string>>() );
+	if(data.find("groups") != the_end)
+	    ui.set_groups( data.at("groups").get<std::vector<std::string>>() );
         return ui;
     }
     catch (json::exception &e)
