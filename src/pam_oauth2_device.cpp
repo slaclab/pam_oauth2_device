@@ -167,6 +167,7 @@ void make_authorization_request(const Config &config,
     pam_oauth2_curl curl(config);
     pam_oauth2_curl::params params;
     curl.add_params(params, "client_id", client_id);
+    curl.add_params(params, "client_secret", client_secret);
     curl.add_params(params, "scope", scope);
     std::string result{curl.call(config, device_endpoint, params)};
 
