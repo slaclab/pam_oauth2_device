@@ -127,7 +127,51 @@ EXPECT_TRUE(!is_authorized_local(ui, "gnumpf"));
 EXPECT_TRUE(is_authorized_local(ui, "fred"));
 // local map test: remote name is not in list
 Userinfo ui2{"0123456789abcdef", "barney.test", "barney"};
-EXPECT_TRUE(!is_authorized_local(ui2, "barney"));
+EXPECT_TRUE( !is_authorized_local(ui2, "barney"));
+}
+
+TEST(LdapEscapeTest, WildcardAuthenticationBypass)
+{
+    // A. Authentication Bypass (The "Wildcard")
+    // Concept: An attacker submits the wildcard character * as the username.
+    // Expected output: \2a
+    EXPECT_EQ(ldap_escape("*"), "\\2a");
+}
+
+TEST(LdapEscapeTest, AuthorizationBypassLogicInjection)
+{
+    // B. Authorization Bypass (Logic Injection)
+    // Concept: This vector targets filters that enforce group membership. The attacker injects a Boolean OR statement to short-circuit the logic.
+    // Payload Example: jdoe)(|(uid=jdoe)
+    // Expected output: jdoe\29\28|\28uid\3djdoe\29
+    EXPECT_EQ(ldap_escape("jdoe)(|(uid=jdoe)"), "jdoe\\29\\28\\7c\\28uid\\3djdoe\\29");
+}
+
+TEST(LdapEscapeTest, BlindDataExfiltrationHighVolumeFuzzing)
+{
+    // C. Blind Data Exfiltration (High-Volume Fuzzing)
+    // Concept: An attacker cannot see the database, so they infer data by asking "True/False" questions via login attempts.
+    // Example: admin)(userPassword=A*
+    // Expected output: admin\29\28userPassword\3dA\2a
+    EXPECT_EQ(ldap_escape("admin)(userPassword=A*"), "admin\\29\\28userPassword\\3dA\\2a");
+}
+
+TEST(LdapEscapeTest, BasicCharacters)
+{
+    // Test with a simple string with no special characters
+    EXPECT_EQ(ldap_escape("username"), "username");
+}
+
+TEST(LdapEscapeTest, EmptyString)
+{
+    // Test with an empty string
+    EXPECT_EQ(ldap_escape(""), "");
+}
+
+TEST(LdapEscapeTest, StringWithNullCharacter)
+{
+    // Test with a string containing a null character
+    EXPECT_EQ(ldap_escape(std::string("user\0name", 9)), "user\\00name");
 }
 
 

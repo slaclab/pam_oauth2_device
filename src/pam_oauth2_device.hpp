@@ -4,6 +4,7 @@
 #include <string>
 #include <cstdio>
 #include "include/pam_oauth2_log.hpp"
+#include "include/config.hpp"
 
 
 /*! @brief userinfo type object (cf RFC 7662)
@@ -76,5 +77,8 @@ Userinfo get_userinfo(Config const &config,
 		      std::string const &userinfo_endpoint,
 		      std::string const &token,
 		      std::string const &username_attribute);
+
+// Input Sanitization Helper
+std::string ldap_escape(const std::string& input);
 
 #endif // PAM_OAUTH2_DEVICE_HPP

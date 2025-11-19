@@ -429,9 +429,10 @@ bool is_authorized(Config const &config,
 	    throw ConfigError("Failed to parse LDAP scope");
 	}
 
-	size_t filter_length = config.ldap_filter.length() + strlen(username_remote) + 1;
+    std::string safe_username = ldap_escape(username_remote);
+	size_t filter_length = config.ldap_filter.length() + safe_username.length() + 1;
         char *filter = new char[filter_length];
-        snprintf(filter, filter_length, config.ldap_filter.c_str(), username_remote);
+        snprintf(filter, filter_length, config.ldap_filter.c_str(), safe_username.c_str());
         int rc = ldap_check_attr(logger.get_pam_handle(), ldap_log_level(logger.log_level()),
 				 config.ldap_host.c_str(), config.ldap_basedn.c_str(), scope,
                                  config.ldap_user.c_str(), config.ldap_passwd.c_str(),
@@ -653,5 +654,26 @@ ldap_log_level(pam_oauth2_log::log_level_t log)
 	return LDAP_LOGLEVEL_OFF;
     }
     throw "cannot happen ATQND";
+}
+
+// Input Sanitization Helper
+std::string ldap_escape(const std::string& input) {
+    std::ostringstream escaped;
+    escaped << std::hex << std::setfill('0'); 
+    for (char c : input) {
+        switch (c) {
+            case '*': escaped << "\\2a"; break;
+            case '(': escaped << "\\28"; break;
+            case ')': escaped << "\\29"; break;
+            case '\\': escaped << "\\5c"; break;
+            case '\0': escaped << "\\00"; break;
+            case '&':  escaped << "\\26"; break;
+            case '|':  escaped << "\\7c"; break;
+            case '!':  escaped << "\\21"; break;
+            case '=':  escaped << "\\3d"; break;
+            default: escaped << c; break;
+        }
+    }
+    return escaped.str();
 }
 
